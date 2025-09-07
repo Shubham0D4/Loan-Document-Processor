@@ -79,6 +79,69 @@ DOCUMENT_TYPES = {
         'validation_regex': None
     }
 }
+# CIBIL Score Categories Configuration
+CIBIL_SCORE_CATEGORIES = {
+    'excellent': {
+        'range': (750, 900),
+        'description': 'Excellent Credit Score',
+        'benefits': [
+            'Highest loan approval chances',
+            'Best interest rates available',
+            'Premium credit card eligibility',
+            'Higher loan amounts',
+            'Faster loan processing'
+        ],
+        'color': 'success'
+    },
+    'good': {
+        'range': (700, 749),
+        'description': 'Good Credit Score',
+        'benefits': [
+            'High loan approval chances',
+            'Competitive interest rates',
+            'Good credit card options',
+            'Standard loan amounts',
+            'Regular processing time'
+        ],
+        'color': 'success'
+    },
+    'fair': {
+        'range': (650, 699),
+        'description': 'Fair Credit Score',
+        'benefits': [
+            'Moderate loan approval chances',
+            'Average interest rates',
+            'Limited credit card options',
+            'May need collateral for larger loans',
+            'Standard to longer processing time'
+        ],
+        'color': 'warning'
+    },
+    'poor': {
+        'range': (550, 649),
+        'description': 'Poor Credit Score',
+        'benefits': [
+            'Lower loan approval chances',
+            'Higher interest rates',
+            'Very limited credit options',
+            'Collateral likely required',
+            'Longer processing time'
+        ],
+        'color': 'error'
+    },
+    'very_poor': {
+        'range': (300, 549),
+        'description': 'Very Poor Credit Score',
+        'benefits': [
+            'Very low loan approval chances',
+            'Very high interest rates',
+            'Secured credit cards only',
+            'High collateral requirements',
+            'Credit repair recommended'
+        ],
+        'color': 'error'
+    }
+}
 
 class DatabaseManager:
     def __init__(self, db_path: str = "loan_verification.db"):
@@ -143,6 +206,21 @@ class DatabaseManager:
             extracted_data TEXT NOT NULL,
             verification_result TEXT,
             confidence_score FLOAT DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (document_id) REFERENCES documents (document_id),
+            FOREIGN KEY (user_id) REFERENCES users (user_id)
+        )
+        ''')
+
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS document_fraud_analysis (
+            fraud_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            document_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            risk_score INTEGER DEFAULT 0,
+            risk_level VARCHAR(20) NOT NULL,
+            fraud_indicators TEXT,
+            recommendation TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (document_id) REFERENCES documents (document_id),
             FOREIGN KEY (user_id) REFERENCES users (user_id)
@@ -303,6 +381,22 @@ class DatabaseManager:
         
         conn.commit()
         conn.close()
+
+    def save_fraud_analysis(self, document_id: int, user_id: int, fraud_result: Dict[str, Any]):
+        """Save fraud analysis results"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+        INSERT INTO document_fraud_analysis 
+        (document_id, user_id, risk_score, risk_level, fraud_indicators, recommendation)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ''', (document_id, user_id, fraud_result['risk_score'], 
+              fraud_result['risk_level'], json.dumps(fraud_result['fraud_indicators']), 
+              fraud_result['recommendation']))
+        
+        conn.commit()
+        conn.close()
     
     def get_instance_documents(self, instance_id: int, user_id: int) -> List[Dict[str, Any]]:
         """Get all documents for a specific instance"""
@@ -372,6 +466,88 @@ class DatabaseManager:
         
         conn.close()
         return messages
+    
+    def delete_document_instance(self, instance_id: int, user_id: int) -> bool:
+        """Delete a document instance and all related data"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        try:
+            # Delete in correct order due to foreign key constraints
+            cursor.execute('DELETE FROM chat_history WHERE instance_id = ? AND user_id = ?', 
+                         (instance_id, user_id))
+            
+            cursor.execute('''DELETE FROM document_fraud_analysis 
+                           WHERE document_id IN (SELECT document_id FROM documents 
+                           WHERE instance_id = ? AND user_id = ?)''', 
+                         (instance_id, user_id))
+            
+            cursor.execute('''DELETE FROM document_analysis 
+                           WHERE document_id IN (SELECT document_id FROM documents 
+                           WHERE instance_id = ? AND user_id = ?)''', 
+                         (instance_id, user_id))
+            
+            cursor.execute('DELETE FROM documents WHERE instance_id = ? AND user_id = ?', 
+                         (instance_id, user_id))
+            
+            cursor.execute('DELETE FROM document_instances WHERE instance_id = ? AND user_id = ?', 
+                         (instance_id, user_id))
+            
+            conn.commit()
+            return True
+            
+        except Exception as e:
+            conn.rollback()
+            st.error(f"Error deleting instance: {e}")
+            return False
+        finally:
+            conn.close()
+    
+    def delete_document(self, document_id: int, user_id: int) -> bool:
+        """Delete a single document and its analysis"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        try:
+            # Delete in correct order due to foreign key constraints
+            cursor.execute('DELETE FROM document_fraud_analysis WHERE document_id = ? AND user_id = ?', 
+                         (document_id, user_id))
+            
+            cursor.execute('DELETE FROM document_analysis WHERE document_id = ? AND user_id = ?', 
+                         (document_id, user_id))
+            
+            cursor.execute('DELETE FROM documents WHERE document_id = ? AND user_id = ?', 
+                         (document_id, user_id))
+            
+            conn.commit()
+            return True
+            
+        except Exception as e:
+            conn.rollback()
+            st.error(f"Error deleting document: {e}")
+            return False
+        finally:
+            conn.close()
+    
+    def update_instance(self, instance_id: int, user_id: int, instance_name: str, description: str) -> bool:
+        """Update instance details"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        try:
+            cursor.execute('''UPDATE document_instances 
+                           SET instance_name = ?, description = ?, updated_at = CURRENT_TIMESTAMP 
+                           WHERE instance_id = ? AND user_id = ?''', 
+                         (instance_name, description, instance_id, user_id))
+            
+            conn.commit()
+            return True
+            
+        except Exception as e:
+            st.error(f"Error updating instance: {e}")
+            return False
+        finally:
+            conn.close()
 
 # Initialize session state
 def init_session_state():
@@ -386,6 +562,7 @@ def init_session_state():
         'processed_documents': {},
         'document_analysis': {},
         'verification_results': {},
+        'fraud_results': {},
         'messages': [],
         'current_page': 'dashboard'
     }
@@ -611,10 +788,400 @@ def extract_fields_with_ai(text: str, doc_type: str, filename: str) -> Dict[str,
         
     except Exception as e:
         return {"error": str(e), "confidence": 0}
+    
+def detect_document_fraud(text: str, extracted_data: Dict[str, Any], doc_type: str) -> Dict[str, Any]:
+    """Detect potential document fraud using pattern analysis"""
+    fraud_indicators = []
+    risk_score = 0
+    
+    # Text-based fraud detection
+    suspicious_patterns = [
+        r'photoshop|edited|modified|fake|duplicate',
+        r'copy|xerox|scan of scan',
+        r'sample|specimen|draft|template'
+    ]
+    
+    text_lower = text.lower()
+    for pattern in suspicious_patterns:
+        if re.search(pattern, text_lower):
+            fraud_indicators.append(f"Suspicious text pattern detected: {pattern}")
+            risk_score += 25
+    
+    # Data consistency checks
+    if doc_type == 'aadhaar':
+        aadhaar = extracted_data.get('Aadhaar Number', '')
+        if aadhaar and not re.match(r'^[2-9]{1}[0-9]{3}\s?[0-9]{4}\s?[0-9]{4}$', aadhaar.replace(' ', '')):
+            fraud_indicators.append("Invalid Aadhaar number format")
+            risk_score += 30
+    
+    elif doc_type == 'pan':
+        pan = extracted_data.get('PAN Number', '')
+        if pan and not re.match(r'^[A-Z]{5}[0-9]{4}[A-Z]{1}$', pan.replace(' ', '')):
+            fraud_indicators.append("Invalid PAN number format")
+            risk_score += 30
+    
+    # Cross-document verification
+    if hasattr(st.session_state, 'document_analysis'):
+        for other_doc in st.session_state.document_analysis.values():
+            # Check name consistency
+            current_name = extracted_data.get('Name', '').strip().lower()
+            other_name = other_doc.get('Name', '').strip().lower()
+            
+            if current_name and other_name and current_name != other_name:
+                fraud_indicators.append("Name mismatch across documents")
+                risk_score += 20
+    
+    # Determine risk level
+    if risk_score >= 50:
+        risk_level = "HIGH"
+        color = "error"
+    elif risk_score >= 25:
+        risk_level = "MEDIUM" 
+        color = "warning"
+    else:
+        risk_level = "LOW"
+        color = "success"
+    
+    return {
+        'risk_score': risk_score,
+        'risk_level': risk_level,
+        'fraud_indicators': fraud_indicators,
+        'color': color,
+        'recommendation': get_fraud_recommendation(risk_level)
+    }
+
+def calculate_loan_eligibility() -> Dict[str, Any]:
+    """Calculate loan eligibility based on processed documents"""
+    if not st.session_state.document_analysis:
+        return {"error": "No documents processed yet"}
+    
+    # Extract financial data
+    monthly_income = 0
+    cibil_score = 0
+    annual_income = 0
+    
+    for analysis in st.session_state.document_analysis.values():
+        # Extract salary information
+        for key in ['Net Pay', 'Monthly Salary', 'Take Home', 'Net Salary']:
+            if key in analysis:
+                try:
+                    pay_str = str(analysis[key]).replace(',', '').replace('₹', '').replace('Rs', '')
+                    amount = float(re.findall(r'\d+\.?\d*', pay_str)[0])
+                    monthly_income = max(monthly_income, amount)
+                except:
+                    pass
+        
+        # Extract annual salary
+        for key in ['Gross Salary', 'Annual Salary', 'CTC']:
+            if key in analysis:
+                try:
+                    salary_str = str(analysis[key]).replace(',', '').replace('₹', '').replace('Rs', '')
+                    amount = float(re.findall(r'\d+\.?\d*', salary_str)[0])
+                    annual_income = max(annual_income, amount)
+                    if monthly_income == 0:
+                        monthly_income = amount / 12
+                except:
+                    pass
+        
+        # Extract CIBIL score
+        for key in ['CIBIL Score', 'Credit Score']:
+            if key in analysis:
+                try:
+                    cibil_score = int(analysis[key])
+                except:
+                    pass
+    
+    # Calculate eligibility
+    if monthly_income == 0:
+        return {"error": "Monthly income not found in documents"}
+    
+    # Base loan calculations (conservative approach)
+    personal_loan_base = monthly_income * 8   # 8x monthly income
+    home_loan_base = monthly_income * 50      # 50x monthly income
+    car_loan_base = monthly_income * 12       # 12x monthly income
+    
+    # CIBIL score multiplier
+    if cibil_score >= 750:
+        cibil_multiplier = 1.3
+        interest_adjustment = "Lowest rates"
+    elif cibil_score >= 700:
+        cibil_multiplier = 1.1
+        interest_adjustment = "Good rates"
+    elif cibil_score >= 650:
+        cibil_multiplier = 0.9
+        interest_adjustment = "Standard rates"
+    elif cibil_score >= 600:
+        cibil_multiplier = 0.7
+        interest_adjustment = "Higher rates"
+    else:
+        cibil_multiplier = 0.5
+        interest_adjustment = "Premium rates"
+    
+    # Income-based adjustments
+    if monthly_income >= 100000:
+        income_multiplier = 1.2
+    elif monthly_income >= 50000:
+        income_multiplier = 1.1
+    elif monthly_income >= 25000:
+        income_multiplier = 1.0
+    else:
+        income_multiplier = 0.8
+    
+    final_multiplier = cibil_multiplier * income_multiplier
+    
+    # Final loan amounts
+    personal_loan_max = personal_loan_base * final_multiplier
+    home_loan_max = home_loan_base * final_multiplier
+    car_loan_max = car_loan_base * final_multiplier
+    
+    # Eligibility status
+    if final_multiplier >= 1.2:
+        eligibility_status = 'Excellent'
+        status_color = 'success'
+    elif final_multiplier >= 1.0:
+        eligibility_status = 'Good'
+        status_color = 'success'
+    elif final_multiplier >= 0.8:
+        eligibility_status = 'Fair'
+        status_color = 'warning'
+    else:
+        eligibility_status = 'Limited'
+        status_color = 'error'
+    
+    return {
+        'monthly_income': monthly_income,
+        'annual_income': annual_income,
+        'cibil_score': cibil_score,
+        'personal_loan_max': personal_loan_max,
+        'home_loan_max': home_loan_max,
+        'car_loan_max': car_loan_max,
+        'eligibility_status': eligibility_status,
+        'status_color': status_color,
+        'interest_adjustment': interest_adjustment,
+        'multiplier': final_multiplier,
+        'emi_ratios': calculate_emi_ratios(monthly_income)
+    }
+
+def calculate_emi_ratios(monthly_income: float) -> Dict[str, Any]:
+    """Calculate recommended EMI ratios"""
+    max_emi_40 = monthly_income * 0.4  # 40% of income
+    max_emi_50 = monthly_income * 0.5  # 50% of income (aggressive)
+    
+    return {
+        'conservative_emi': max_emi_40,
+        'aggressive_emi': max_emi_50,
+        'recommended_limit': max_emi_40
+    }
+
+def get_loan_recommendations(eligibility_data: Dict[str, Any]) -> List[str]:
+    """Get personalized loan recommendations"""
+    recommendations = []
+    
+    if eligibility_data.get('error'):
+        return ["Please upload salary slip or income documents first"]
+    
+    monthly_income = eligibility_data['monthly_income']
+    cibil_score = eligibility_data['cibil_score']
+    status = eligibility_data['eligibility_status']
+    
+    if status == 'Excellent':
+        recommendations.extend([
+            "You qualify for premium loan products with best interest rates",
+            "Consider pre-approved loan offers from multiple banks",
+            "Negotiate for processing fee waivers"
+        ])
+    elif status == 'Good':
+        recommendations.extend([
+            "Good eligibility for most loan products",
+            "Compare offers from 3-4 different lenders",
+            "Consider increasing CIBIL score for better rates"
+        ])
+    elif status == 'Fair':
+        recommendations.extend([
+            "Work on improving CIBIL score before applying",
+            "Consider secured loans for better rates",
+            "Maintain stable employment history"
+        ])
+    else:
+        recommendations.extend([
+            "Focus on CIBIL score improvement first",
+            "Consider co-applicant or guarantor",
+            "Start with smaller loan amounts"
+        ])
+    
+    # Income-specific recommendations
+    if monthly_income < 25000:
+        recommendations.append("Consider income enhancement before large loans")
+    elif monthly_income > 100000:
+        recommendations.append("Explore premium banking relationships for better deals")
+    
+    return recommendations
+
+def get_fraud_recommendation(risk_level: str) -> str:
+    """Get recommendation based on fraud risk level"""
+    if risk_level == "HIGH":
+        return "Manual verification required. Contact applicant for original documents."
+    elif risk_level == "MEDIUM":
+        return "Additional verification recommended. Review document carefully."
+    else:
+        return "Document appears authentic. Proceed with normal processing."
 
 def verify_document(doc_type: str, analysis: Dict[str, Any]) -> Dict[str, Any]:
     """Basic document verification"""
     return {'is_valid': True, 'details': ['Basic verification passed']}
+
+def analyze_cibil_score(score: int) -> Dict[str, Any]:
+    """Analyze CIBIL score and provide detailed feedback"""
+    if not (300 <= score <= 900):
+        return {
+            'error': 'Invalid CIBIL score. Score should be between 300-900',
+            'category': None,
+            'recommendations': []
+        }
+    
+    # Find the appropriate category
+    category_info = None
+    category_key = None
+    
+    for key, info in CIBIL_SCORE_CATEGORIES.items():
+        min_score, max_score = info['range']
+        if min_score <= score <= max_score:
+            category_info = info
+            category_key = key
+            break
+    
+    if not category_info:
+        return {
+            'error': 'Could not categorize score',
+            'category': None,
+            'recommendations': []
+        }
+    
+    # Generate recommendations based on category
+    recommendations = []
+    
+    if category_key == 'very_poor':
+        recommendations = [
+            "Focus on paying all bills on time",
+            "Reduce credit utilization below 30%",
+            "Consider secured credit cards",
+            "Check credit report for errors",
+            "Avoid applying for new credit temporarily"
+        ]
+    elif category_key == 'poor':
+        recommendations = [
+            "Maintain consistent payment history",
+            "Keep credit utilization low",
+            "Consider credit builder loans",
+            "Monitor credit report regularly",
+            "Pay down existing debt"
+        ]
+    elif category_key == 'fair':
+        recommendations = [
+            "Continue making timely payments",
+            "Gradually reduce credit utilization",
+            "Consider increasing credit limits",
+            "Maintain old credit accounts",
+            "Diversify credit types"
+        ]
+    elif category_key == 'good':
+        recommendations = [
+            "Maintain excellent payment history",
+            "Keep credit utilization below 10%",
+            "Consider premium credit products",
+            "Monitor for identity theft",
+            "Plan for major purchases"
+        ]
+    elif category_key == 'excellent':
+        recommendations = [
+            "Maintain current excellent habits",
+            "Leverage score for best rates",
+            "Consider investment opportunities",
+            "Help family members improve credit",
+            "Regular monitoring for fraud"
+        ]
+    
+    return {
+        'score': score,
+        'category': category_key,
+        'description': category_info['description'],
+        'benefits': category_info['benefits'],
+        'color': category_info['color'],
+        'recommendations': recommendations,
+        'loan_eligibility': get_loan_eligibility(score),
+        'interest_rate_range': get_interest_rate_range(score)
+    }
+
+def get_loan_eligibility(score: int) -> Dict[str, str]:
+    """Get loan eligibility based on CIBIL score"""
+    if score >= 750:
+        return {
+            'personal_loan': 'Excellent',
+            'home_loan': 'Excellent', 
+            'car_loan': 'Excellent',
+            'credit_card': 'Premium cards available'
+        }
+    elif score >= 700:
+        return {
+            'personal_loan': 'Very Good',
+            'home_loan': 'Very Good',
+            'car_loan': 'Very Good', 
+            'credit_card': 'Good cards available'
+        }
+    elif score >= 650:
+        return {
+            'personal_loan': 'Good',
+            'home_loan': 'Good',
+            'car_loan': 'Good',
+            'credit_card': 'Standard cards available'
+        }
+    elif score >= 550:
+        return {
+            'personal_loan': 'Difficult',
+            'home_loan': 'Requires collateral',
+            'car_loan': 'Higher down payment',
+            'credit_card': 'Limited options'
+        }
+    else:
+        return {
+            'personal_loan': 'Very Difficult',
+            'home_loan': 'Substantial collateral required',
+            'car_loan': 'High down payment required',
+            'credit_card': 'Secured cards only'
+        }
+
+def get_interest_rate_range(score: int) -> Dict[str, str]:
+    """Get estimated interest rate ranges based on CIBIL score"""
+    if score >= 750:
+        return {
+            'personal_loan': '10.5% - 14%',
+            'home_loan': '6.7% - 8.5%',
+            'car_loan': '7% - 9%'
+        }
+    elif score >= 700:
+        return {
+            'personal_loan': '12% - 16%',
+            'home_loan': '7.5% - 9.5%',
+            'car_loan': '8% - 10.5%'
+        }
+    elif score >= 650:
+        return {
+            'personal_loan': '14% - 18%',
+            'home_loan': '8.5% - 11%',
+            'car_loan': '9.5% - 12%'
+        }
+    elif score >= 550:
+        return {
+            'personal_loan': '16% - 22%',
+            'home_loan': '10% - 13%',
+            'car_loan': '11% - 14%'
+        }
+    else:
+        return {
+            'personal_loan': '18% - 25%',
+            'home_loan': '12% - 15%',
+            'car_loan': '13% - 16%'
+        }
 
 def configure_gemini_api(api_key: str) -> bool:
     """Configure the Gemini API"""
@@ -652,8 +1219,10 @@ def show_sidebar():
         
         pages = {
             'dashboard': 'Dashboard',
-            'documents': 'Document Processing', 
+            'documents': 'Document Processing',
             'chat': 'Q&A Chat',
+            'cibil': 'CIBIL Score Verification',
+            'eligibility': 'Loan Eligibility', 
             'history': 'History'
         }
         
@@ -701,6 +1270,7 @@ def show_instance_management():
         for instance in instances:
             is_active = st.session_state.current_instance_id == instance['instance_id']
             
+            # Instance selection button
             if st.button(
                 f"📁 {instance['instance_name']}", 
                 key=f"instance_{instance['instance_id']}",
@@ -711,9 +1281,68 @@ def show_instance_management():
                 load_instance_data(instance['instance_id'])
                 st.rerun()
             
+            # Instance actions
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button("✏️", key=f"edit_{instance['instance_id']}", help="Edit"):
+                    st.session_state[f"editing_{instance['instance_id']}"] = True
+                    st.rerun()
+            
+            with col2:
+                if st.button("🗑️", key=f"delete_{instance['instance_id']}", help="Delete"):
+                    st.session_state[f"confirm_delete_{instance['instance_id']}"] = True
+                    st.rerun()
+            
+            # Edit form
+            if st.session_state.get(f"editing_{instance['instance_id']}", False):
+                with st.form(f"edit_form_{instance['instance_id']}"):
+                    new_name = st.text_input("Name", value=instance['instance_name'])
+                    new_desc = st.text_area("Description", value=instance.get('description', ''))
+                    
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        if st.form_submit_button("Save"):
+                            db = DatabaseManager()
+                            if db.update_instance(instance['instance_id'], st.session_state.user_id, new_name, new_desc):
+                                st.success("Instance updated!")
+                                del st.session_state[f"editing_{instance['instance_id']}"]
+                                st.rerun()
+                    
+                    with col2:
+                        if st.form_submit_button("Cancel"):
+                            del st.session_state[f"editing_{instance['instance_id']}"]
+                            st.rerun()
+            
+            # Delete confirmation
+            if st.session_state.get(f"confirm_delete_{instance['instance_id']}", False):
+                st.error(f"Delete '{instance['instance_name']}'?")
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    if st.button("Yes, Delete", key=f"confirm_yes_{instance['instance_id']}", type="primary"):
+                        db = DatabaseManager()
+                        if db.delete_document_instance(instance['instance_id'], st.session_state.user_id):
+                            if st.session_state.current_instance_id == instance['instance_id']:
+                                st.session_state.current_instance_id = None
+                                st.session_state.processed_documents = {}
+                                st.session_state.document_analysis = {}
+                                st.session_state.verification_results = {}
+                                st.session_state.fraud_results = {}
+                                st.session_state.messages = []
+                            
+                            st.success("Instance deleted!")
+                            del st.session_state[f"confirm_delete_{instance['instance_id']}"]
+                            st.rerun()
+                
+                with col2:
+                    if st.button("Cancel", key=f"confirm_no_{instance['instance_id']}"):
+                        del st.session_state[f"confirm_delete_{instance['instance_id']}"]
+                        st.rerun()
+            
             if instance['description']:
                 st.caption(instance['description'])
             st.caption(f"Updated: {instance['updated_at'][:16]}")
+            st.divider()
     else:
         st.info("No instances yet. Create your first one above!")
 
@@ -726,6 +1355,7 @@ def load_instance_data(instance_id: int):
     st.session_state.processed_documents = {}
     st.session_state.document_analysis = {}
     st.session_state.verification_results = {}
+    st.session_state.fraud_results = {} 
     
     for doc in documents:
         doc_id = str(doc['document_id'])
@@ -776,6 +1406,25 @@ def show_dashboard():
     with col4:
         st.metric("API Status", "Configured" if st.session_state.gemini_configured else "Not Set")
     
+    if st.session_state.document_analysis:
+        eligibility = calculate_loan_eligibility()
+        if not eligibility.get('error'):
+            st.subheader("Loan Eligibility Summary")
+            col1, col2, col3, col4 = st.columns(4)
+            
+            with col1:
+                st.metric("Personal Loan", f"₹{eligibility['personal_loan_max']/100000:.1f}L")
+            with col2:
+                st.metric("Home Loan", f"₹{eligibility['home_loan_max']/1000000:.1f}Cr")
+            with col3:
+                st.metric("Car Loan", f"₹{eligibility['car_loan_max']/100000:.1f}L")
+            with col4:
+                if st.button("View Details", key="dashboard_eligibility"):
+                    st.session_state.current_page = 'eligibility'
+                    st.rerun()
+    
+    st.divider()
+
     # Recent instances
     st.subheader("Recent Instances")
     
@@ -838,6 +1487,73 @@ def show_documents_page():
     if uploaded_files and st.session_state.gemini_configured:
         if st.button("Process All Documents", type="primary"):
             process_documents_with_db(uploaded_files)
+
+    # Bulk operations
+    if st.session_state.processed_documents:
+        st.subheader("Bulk Operations")
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            if st.button("🗑️ Clear All Documents", type="secondary"):
+                st.session_state.confirm_clear_all = True
+                st.rerun()
+        
+        with col2:
+            if st.button("📊 Regenerate Analysis", type="secondary"):
+                st.info("This will reprocess all documents with current AI model")
+                st.session_state.confirm_regenerate = True
+                st.rerun()
+        
+        with col3:
+            doc_count = len(st.session_state.processed_documents)
+            st.metric("Total Documents", doc_count)
+        
+        # Confirm clear all
+        if st.session_state.get('confirm_clear_all', False):
+            st.error("Delete ALL documents in this instance?")
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                if st.button("Yes, Delete All", type="primary"):
+                    db = DatabaseManager()
+                    success_count = 0
+                    
+                    for doc_id in list(st.session_state.processed_documents.keys()):
+                        if db.delete_document(int(doc_id), st.session_state.user_id):
+                            success_count += 1
+                    
+                    # Clear session state
+                    st.session_state.processed_documents = {}
+                    st.session_state.document_analysis = {}
+                    st.session_state.verification_results = {}
+                    st.session_state.fraud_results = {}
+                    
+                    st.success(f"Deleted {success_count} documents")
+                    del st.session_state.confirm_clear_all
+                    st.rerun()
+            
+            with col2:
+                if st.button("Cancel"):
+                    del st.session_state.confirm_clear_all
+                    st.rerun()
+        
+        # Confirm regenerate
+        if st.session_state.get('confirm_regenerate', False):
+            st.info("This will reprocess all documents. Continue?")
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                if st.button("Yes, Regenerate"):
+                    st.info("Regeneration feature coming soon!")
+                    del st.session_state.confirm_regenerate
+                    st.rerun()
+            
+            with col2:
+                if st.button("Cancel"):
+                    del st.session_state.confirm_regenerate
+                    st.rerun()
+        
+        st.divider()
     
     # Show processed documents
     if st.session_state.processed_documents:
@@ -845,6 +1561,45 @@ def show_documents_page():
         
         for doc_id, doc_info in st.session_state.processed_documents.items():
             with st.expander(f"📄 {doc_info['filename']}"):
+                # Document actions header
+                col1, col2, col3 = st.columns([3, 1, 1])
+                
+                with col2:
+                    if st.button("🔄", key=f"reprocess_{doc_id}", help="Reprocess"):
+                        st.info("Reprocessing feature coming soon!")
+                
+                with col3:
+                    if st.button("🗑️", key=f"delete_doc_{doc_id}", help="Delete Document"):
+                        st.session_state[f"confirm_delete_doc_{doc_id}"] = True
+                        st.rerun()
+                
+                # Delete confirmation
+                if st.session_state.get(f"confirm_delete_doc_{doc_id}", False):
+                    st.error("Delete this document?")
+                    col1, col2 = st.columns(2)
+                    
+                    with col1:
+                        if st.button("Yes, Delete", key=f"confirm_doc_yes_{doc_id}", type="primary"):
+                            db = DatabaseManager()
+                            if db.delete_document(int(doc_id), st.session_state.user_id):
+                                # Remove from session state
+                                del st.session_state.processed_documents[doc_id]
+                                if doc_id in st.session_state.document_analysis:
+                                    del st.session_state.document_analysis[doc_id]
+                                if doc_id in st.session_state.verification_results:
+                                    del st.session_state.verification_results[doc_id]
+                                if doc_id in st.session_state.fraud_results:
+                                    del st.session_state.fraud_results[doc_id]
+                                
+                                st.success("Document deleted!")
+                                del st.session_state[f"confirm_delete_doc_{doc_id}"]
+                                st.rerun()
+                    
+                    with col2:
+                        if st.button("Cancel", key=f"confirm_doc_no_{doc_id}"):
+                            del st.session_state[f"confirm_delete_doc_{doc_id}"]
+                            st.rerun()
+                
                 col1, col2 = st.columns(2)
                 
                 with col1:
@@ -859,6 +1614,15 @@ def show_documents_page():
                             st.success("✅ Verified")
                         else:
                             st.error("❌ Issues Found")
+
+                    if doc_id in st.session_state.fraud_results:
+                        fraud = st.session_state.fraud_results[doc_id]
+                        if fraud['risk_level'] == 'LOW':
+                            st.success(f"🛡️ Low Risk ({fraud['risk_score']})")
+                        elif fraud['risk_level'] == 'MEDIUM':
+                            st.warning(f"⚠️ Medium Risk ({fraud['risk_score']})")
+                        else:
+                            st.error(f"🚨 High Risk ({fraud['risk_score']})")
                 
                 # Show extracted data
                 if doc_id in st.session_state.document_analysis:
@@ -868,6 +1632,19 @@ def show_documents_page():
                         if key not in ['confidence', 'document_type', 'filename', 'processed_at', 'error']:
                             if value and value != "Not Available":
                                 st.write(f"- **{key}:** {value}")
+
+                # Show fraud analysis
+                if doc_id in st.session_state.fraud_results:
+                    fraud = st.session_state.fraud_results[doc_id]
+                    st.write("**Security Analysis:**")
+                    st.write(f"- **Risk Level:** {fraud['risk_level']}")
+                    st.write(f"- **Risk Score:** {fraud['risk_score']}/100")
+                    st.write(f"- **Recommendation:** {fraud['recommendation']}")
+                    
+                    if fraud['fraud_indicators']:
+                        st.write("**Security Concerns:**")
+                        for indicator in fraud['fraud_indicators']:
+                            st.write(f"  ⚠️ {indicator}")
 
 def process_documents_with_db(uploaded_files):
     """Process documents and save to database"""
@@ -899,6 +1676,7 @@ def process_documents_with_db(uploaded_files):
         doc_type = identify_document_type(text)
         analysis = extract_fields_with_ai(text, doc_type, uploaded_file.name)
         verification = verify_document(doc_type, analysis)
+        fraud_check = detect_document_fraud(text, analysis, doc_type)
         
         # Save to database
         document_id = db.save_document(
@@ -916,6 +1694,8 @@ def process_documents_with_db(uploaded_files):
             verification,
             analysis.get('confidence', 0)
         )
+
+        db.save_fraud_analysis(document_id, st.session_state.user_id, fraud_check)
         
         # Update session state
         doc_id = str(document_id)
@@ -928,6 +1708,7 @@ def process_documents_with_db(uploaded_files):
         
         st.session_state.document_analysis[doc_id] = analysis
         st.session_state.verification_results[doc_id] = verification
+        st.session_state.fraud_results[doc_id] = fraud_check  # Add this line
     
     progress_bar.empty()
     status_text.success("All documents processed successfully!")
@@ -1081,11 +1862,70 @@ def show_history_page():
                     st.write(f"**Description:** {instance['description']}")
                 
                 # Load instance button
-                if st.button(f"Load Instance", key=f"hist_load_{instance['instance_id']}"):
-                    st.session_state.current_instance_id = instance['instance_id']
-                    load_instance_data(instance['instance_id'])
-                    st.success(f"Loaded instance: {instance['instance_name']}")
-                    st.rerun()
+                col1, col2, col3 = st.columns(3)
+                
+                with col1:
+                    if st.button("Load", key=f"hist_load_{instance['instance_id']}"):
+                        st.session_state.current_instance_id = instance['instance_id']
+                        load_instance_data(instance['instance_id'])
+                        st.success(f"Loaded instance: {instance['instance_name']}")
+                        st.rerun()
+                
+                with col2:
+                    if st.button("Edit", key=f"hist_edit_{instance['instance_id']}"):
+                        st.session_state[f"hist_editing_{instance['instance_id']}"] = True
+                        st.rerun()
+                
+                with col3:
+                    if st.button("Delete", key=f"hist_delete_{instance['instance_id']}"):
+                        st.session_state[f"hist_confirm_delete_{instance['instance_id']}"] = True
+                        st.rerun()
+                
+                # Edit form in history
+                if st.session_state.get(f"hist_editing_{instance['instance_id']}", False):
+                    with st.form(f"hist_edit_form_{instance['instance_id']}"):
+                        new_name = st.text_input("Instance Name", value=instance['instance_name'])
+                        new_desc = st.text_area("Description", value=instance.get('description', ''))
+                        
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            if st.form_submit_button("Update"):
+                                db = DatabaseManager()
+                                if db.update_instance(instance['instance_id'], st.session_state.user_id, new_name, new_desc):
+                                    st.success("Instance updated!")
+                                    del st.session_state[f"hist_editing_{instance['instance_id']}"]
+                                    st.rerun()
+                        
+                        with col2:
+                            if st.form_submit_button("Cancel"):
+                                del st.session_state[f"hist_editing_{instance['instance_id']}"]
+                                st.rerun()
+                
+                # Delete confirmation in history
+                if st.session_state.get(f"hist_confirm_delete_{instance['instance_id']}", False):
+                    st.error(f"Permanently delete '{instance['instance_name']}'?")
+                    col1, col2 = st.columns(2)
+                    
+                    with col1:
+                        if st.button("Delete Forever", key=f"hist_confirm_yes_{instance['instance_id']}", type="primary"):
+                            db = DatabaseManager()
+                            if db.delete_document_instance(instance['instance_id'], st.session_state.user_id):
+                                if st.session_state.current_instance_id == instance['instance_id']:
+                                    st.session_state.current_instance_id = None
+                                    st.session_state.processed_documents = {}
+                                    st.session_state.document_analysis = {}
+                                    st.session_state.verification_results = {}
+                                    st.session_state.fraud_results = {}
+                                    st.session_state.messages = []
+                                
+                                st.success("Instance permanently deleted!")
+                                del st.session_state[f"hist_confirm_delete_{instance['instance_id']}"]
+                                st.rerun()
+                    
+                    with col2:
+                        if st.button("Keep It", key=f"hist_confirm_no_{instance['instance_id']}"):
+                            del st.session_state[f"hist_confirm_delete_{instance['instance_id']}"]
+                            st.rerun()
             
             # Documents in this instance
             docs = db.get_instance_documents(instance['instance_id'], st.session_state.user_id)
@@ -1109,6 +1949,325 @@ def show_history_page():
             else:
                 st.write("*No documents in this instance*")
 
+def show_loan_eligibility_page():
+    """Loan Eligibility Calculator Page"""
+    st.header("Loan Eligibility Calculator")
+    
+    st.markdown("""
+    <div style="background: linear-gradient(90deg, #1f4e79 0%, #2e8b57 100%); color: white; padding: 1rem; border-radius: 10px; margin-bottom: 2rem;">
+        <h3>📊 Check Your Loan Eligibility</h3>
+        <p>Based on your processed documents, get instant loan eligibility and recommendations</p>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    # Check if documents are processed
+    if not st.session_state.document_analysis:
+        st.warning("No documents processed yet. Please upload and process your documents first.")
+        if st.button("Go to Document Processing", type="primary"):
+            st.session_state.current_page = 'documents'
+            st.rerun()
+        return
+    
+    # Calculate eligibility
+    eligibility = calculate_loan_eligibility()
+    
+    if eligibility.get('error'):
+        st.error(eligibility['error'])
+        st.info("Please ensure you have uploaded salary slip or income documents.")
+        return
+    
+    # Display results
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        st.metric(
+            "Monthly Income", 
+            f"₹{eligibility['monthly_income']:,.0f}"
+        )
+    
+    with col2:
+        cibil_display = eligibility['cibil_score'] if eligibility['cibil_score'] > 0 else "Not Available"
+        st.metric("CIBIL Score", cibil_display)
+    
+    with col3:
+        status_color = eligibility['status_color']
+        if status_color == 'success':
+            st.success(f"Eligibility: {eligibility['eligibility_status']}")
+        elif status_color == 'warning':
+            st.warning(f"Eligibility: {eligibility['eligibility_status']}")
+        else:
+            st.error(f"Eligibility: {eligibility['eligibility_status']}")
+    
+    st.divider()
+    
+    # Loan eligibility amounts
+    st.subheader("Maximum Loan Eligibility")
+    
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        st.markdown("""
+        <div style="border: 2px solid #28a745; border-radius: 10px; padding: 1rem; text-align: center;">
+            <h4 style="color: #28a745; margin: 0;">Personal Loan</h4>
+            <h2 style="color: #28a745; margin: 10px 0;">₹{:,.0f}</h2>
+            <p style="margin: 0; color: #666;">Unsecured loan</p>
+        </div>
+        """.format(eligibility['personal_loan_max']), unsafe_allow_html=True)
+    
+    with col2:
+        st.markdown("""
+        <div style="border: 2px solid #007bff; border-radius: 10px; padding: 1rem; text-align: center;">
+            <h4 style="color: #007bff; margin: 0;">Home Loan</h4>
+            <h2 style="color: #007bff; margin: 10px 0;">₹{:,.0f}</h2>
+            <p style="margin: 0; color: #666;">Property secured</p>
+        </div>
+        """.format(eligibility['home_loan_max']), unsafe_allow_html=True)
+    
+    with col3:
+        st.markdown("""
+        <div style="border: 2px solid #fd7e14; border-radius: 10px; padding: 1rem; text-align: center;">
+            <h4 style="color: #fd7e14; margin: 0;">Car Loan</h4>
+            <h2 style="color: #fd7e14; margin: 10px 0;">₹{:,.0f}</h2>
+            <p style="margin: 0; color: #666;">Vehicle secured</p>
+        </div>
+        """.format(eligibility['car_loan_max']), unsafe_allow_html=True)
+    
+    # EMI recommendations
+    st.subheader("EMI Recommendations")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.write("**Conservative Approach (Recommended)**")
+        st.write(f"Maximum EMI: ₹{eligibility['emi_ratios']['conservative_emi']:,.0f}")
+        st.write("40% of monthly income")
+        st.success("Leaves room for other expenses and emergencies")
+    
+    with col2:
+        st.write("**Aggressive Approach**")
+        st.write(f"Maximum EMI: ₹{eligibility['emi_ratios']['aggressive_emi']:,.0f}")
+        st.write("50% of monthly income")
+        st.warning("Higher risk - limited flexibility for other expenses")
+    
+    # Interest rate guidance
+    st.subheader("Interest Rate Guidance")
+    st.info(f"Based on your profile: {eligibility['interest_adjustment']}")
+    
+    # Personalized recommendations
+    st.subheader("Personalized Recommendations")
+    recommendations = get_loan_recommendations(eligibility)
+    
+    for i, recommendation in enumerate(recommendations, 1):
+        st.write(f"{i}. {recommendation}")
+    
+    # Loan comparison table
+    st.subheader("Loan Type Comparison")
+    
+    comparison_data = {
+        'Loan Type': ['Personal Loan', 'Home Loan', 'Car Loan'],
+        'Maximum Amount': [
+            f"₹{eligibility['personal_loan_max']:,.0f}",
+            f"₹{eligibility['home_loan_max']:,.0f}",
+            f"₹{eligibility['car_loan_max']:,.0f}"
+        ],
+        'Typical Interest Rate': ['10.5% - 18%', '6.7% - 9.5%', '7% - 12%'],
+        'Maximum Tenure': ['5 years', '30 years', '7 years'],
+        'Processing Fee': ['1-3%', '0.5-1%', '1-2%']
+    }
+    
+    st.table(comparison_data)
+    
+    # Action buttons
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        if st.button("Download Eligibility Report", type="primary", use_container_width=True):
+            report_data = {
+                'eligibility_summary': eligibility,
+                'recommendations': recommendations,
+                'generated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                'user': st.session_state.username
+            }
+            
+            st.download_button(
+                "Click to Download",
+                json.dumps(report_data, indent=2),
+                f"loan_eligibility_{st.session_state.username}.json",
+                "application/json"
+            )
+    
+    with col2:
+        if st.button("Improve Eligibility Tips", use_container_width=True):
+            show_eligibility_improvement_tips(eligibility)
+    
+    with col3:
+        if st.button("Compare Lenders", use_container_width=True):
+            st.info("Feature coming soon - Compare rates across different lenders")
+
+def show_eligibility_improvement_tips(eligibility_data: Dict[str, Any]):
+    """Show tips to improve loan eligibility"""
+    st.subheader("How to Improve Your Loan Eligibility")
+    
+    current_status = eligibility_data['eligibility_status']
+    cibil_score = eligibility_data['cibil_score']
+    monthly_income = eligibility_data['monthly_income']
+    
+    tips = []
+    
+    # CIBIL score improvement
+    if cibil_score == 0:
+        tips.extend([
+            "🎯 **Get your CIBIL report**: First step is to know your current score",
+            "📊 **Build credit history**: Start with a secured credit card if you have no credit history"
+        ])
+    elif cibil_score < 650:
+        tips.extend([
+            "🎯 **Pay all bills on time**: Most important factor for CIBIL improvement",
+            "💳 **Reduce credit utilization**: Keep it below 30% of limit",
+            "🔍 **Check for errors**: Dispute any incorrect information in your report"
+        ])
+    elif cibil_score < 750:
+        tips.extend([
+            "📈 **Maintain current good habits**: Keep paying bills on time",
+            "💳 **Optimize credit utilization**: Aim for below 10% for excellent scores",
+            "🏦 **Diversify credit types**: Mix of credit cards and loans helps"
+        ])
+    
+    # Income improvement
+    if monthly_income < 50000:
+        tips.extend([
+            "💼 **Increase income**: Higher salary directly improves eligibility",
+            "👥 **Consider co-applicant**: Spouse or family member can boost eligibility",
+            "📄 **Document all income**: Include bonuses, freelance, rental income"
+        ])
+    
+    # General tips
+    tips.extend([
+        "🏦 **Maintain bank relationship**: Long-term banking history helps",
+        "💰 **Reduce existing EMIs**: Pay off smaller loans first",
+        "📱 **Use bank's mobile app**: Digital footprint shows engagement",
+        "⏰ **Wait before applying**: Don't apply to multiple lenders simultaneously"
+    ])
+    
+    for tip in tips:
+        st.write(tip)
+    
+    # Timeline for improvement
+    st.subheader("Expected Improvement Timeline")
+    timeline = [
+        "**1-2 months**: Reduce credit utilization, update income documents",
+        "**3-6 months**: Consistent payment history starts reflecting in CIBIL",
+        "**6-12 months**: Significant CIBIL score improvement visible",
+        "**12+ months**: Optimal eligibility achieved with sustained good habits"
+    ]
+    
+    for period in timeline:
+        st.write(f"• {period}")
+
+def show_cibil_verification_page():
+    """CIBIL Score Verification and Analysis Page"""
+    st.header("CIBIL Score Verification & Analysis")
+    
+    st.markdown("""
+    <div style="background: linear-gradient(90deg, #1f4e79 0%, #2e8b57 100%); color: white; padding: 1rem; border-radius: 10px; margin-bottom: 2rem;">
+        <h3>📊 Check Your Credit Score Category</h3>
+        <p>Enter your CIBIL score to get detailed analysis and loan eligibility information</p>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    col1, col2, col3 = st.columns([1, 2, 1])
+    
+    with col2:
+        st.subheader("Enter Your CIBIL Score")
+        
+        # Score input form
+        with st.form("cibil_score_form", clear_on_submit=False):
+            score = st.number_input(
+                "CIBIL Score (300-900)",
+                min_value=300,
+                max_value=900,
+                step=1,
+                help="Enter your current CIBIL score between 300 and 900"
+            )
+            
+            submitted = st.form_submit_button("Analyze Score", type="primary", use_container_width=True)
+        
+        if submitted and score:
+            analysis = analyze_cibil_score(score)
+            
+            if analysis.get('error'):
+                st.error(analysis['error'])
+            else:
+                # Display results
+                st.success(f"Analysis Complete for Score: {score}")
+                
+                # Score category display
+                category_color = 'green' if analysis['color'] == 'success' else ('orange' if analysis['color'] == 'warning' else 'red')
+                
+                st.markdown(f"""
+                <div style="background: {category_color}; color: white; padding: 1rem; border-radius: 8px; text-align: center; margin: 1rem 0;">
+                    <h2>{analysis['description']}</h2>
+                    <h3>Score: {score}/900</h3>
+                </div>
+                """, unsafe_allow_html=True)
+                
+                # Benefits and features
+                st.subheader("What Your Score Means:")
+                for benefit in analysis['benefits']:
+                    st.write(f"✓ {benefit}")
+                
+                # Loan eligibility
+                st.subheader("Loan Eligibility")
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    st.write("**Loan Types:**")
+                    for loan_type, eligibility in analysis['loan_eligibility'].items():
+                        st.write(f"• **{loan_type.replace('_', ' ').title()}:** {eligibility}")
+                
+                with col2:
+                    st.write("**Estimated Interest Rates:**")
+                    for loan_type, rate in analysis['interest_rate_range'].items():
+                        st.write(f"• **{loan_type.replace('_', ' ').title()}:** {rate}")
+                
+                # Recommendations
+                st.subheader("Recommendations to Improve")
+                for i, recommendation in enumerate(analysis['recommendations'], 1):
+                    st.write(f"{i}. {recommendation}")
+                
+                # Score improvement tips
+                st.subheader("General Tips for Better Credit Score")
+                tips = [
+                    "Pay all bills and EMIs on time",
+                    "Keep credit utilization ratio below 30%",
+                    "Maintain a healthy mix of secured and unsecured loans",
+                    "Don't close old credit cards",
+                    "Check your credit report regularly for errors",
+                    "Avoid applying for multiple loans/cards simultaneously",
+                    "Keep old accounts active with small transactions"
+                ]
+                
+                for tip in tips:
+                    st.write(f"💡 {tip}")
+    
+    # CIBIL Score ranges reference
+    st.divider()
+    st.subheader("CIBIL Score Ranges Reference")
+    
+    cols = st.columns(len(CIBIL_SCORE_CATEGORIES))
+    
+    for i, (key, info) in enumerate(CIBIL_SCORE_CATEGORIES.items()):
+        with cols[i]:
+            color = 'green' if info['color'] == 'success' else ('orange' if info['color'] == 'warning' else 'red')
+            min_score, max_score = info['range']
+            
+            st.markdown(f"""
+            <div style="border: 2px solid {color}; border-radius: 8px; padding: 0.5rem; text-align: center; height: 160px;">
+                <h4 style="color: {color}; margin: 0;">{info['description']}</h4>
+                <h3 style="color: {color}; margin: 10px 0;">{min_score}-{max_score}</h3>
+            </div>
+            """, unsafe_allow_html=True)
+
 def main():
     """Main application entry point"""
     init_session_state()
@@ -1128,6 +2287,10 @@ def main():
         show_documents_page()
     elif st.session_state.current_page == 'chat':
         show_chat_page()
+    elif st.session_state.current_page == 'cibil':  # Add this block
+        show_cibil_verification_page()
+    elif st.session_state.current_page == 'eligibility':  # Add this block
+        show_loan_eligibility_page()
     elif st.session_state.current_page == 'history':
         show_history_page()
     else:
